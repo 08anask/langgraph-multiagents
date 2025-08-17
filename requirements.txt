@@ -1,0 +1,7 @@
+flask
+uvicorn
+streamlit
+langgraph
+python-dotenv
+requests
+beautifulsoup4
