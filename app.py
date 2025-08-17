@@ -1,19 +1,21 @@
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 
 from helpers.graph_manager import GraphManager
+from helpers import utils as U
+from helpers.utils import (
+    list_file_paths, load_path_as_documents, load_all_documents, _format_required
+)
 
-# Instantiate once (loads models, builds graph, enables memory)
 graph = GraphManager()
 
 app = FastAPI(title="RAG + Internet Manager Graph API", version="1.0.0")
 
-# CORS (adjust as needed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
@@ -24,34 +26,87 @@ app.add_middleware(
 
 class QueryRequest(BaseModel):
     thread_id: str = Field(..., description="Conversation/thread key for short-term memory")
-    query: Optional[str] = Field(None, description="User query")
-    user_reply: Optional[str] = Field(None, description='Free-form reply like "yes" or "no" for consent')
-    user_consent_internet: Optional[bool] = Field(None, description="Explicit boolean consent to use the web")
+    query: str = Field(..., description="User query")
 
-class QueryResponse(BaseModel):
-    final: Dict[str, Any]
+class FinalResponse(BaseModel):
+    manager_agent: Dict[str, Any]
+    agent_responses: Dict[str, Any]
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-@app.post("/query", response_model=QueryResponse)
+@app.post("/query", response_model=FinalResponse)
 def query(req: QueryRequest):
-    if not (req.query or req.user_reply is not None or req.user_consent_internet is not None):
-        raise HTTPException(status_code=400, detail="Send at least one of: query, user_reply, user_consent_internet")
-
-    
+    if not req.query:
+        raise HTTPException(status_code=400, detail="Send a query")
     final = graph.invoke(
-        thread_id=req.thread_id,
-        query=req.query,
-        user_reply=req.user_reply,
-        user_consent_internet=req.user_consent_internet,
+        thread_id=req.thread_id if hasattr(req, "thread_id") else "default",
+        query=req.query
     )
-    if final is None:
-        raise HTTPException(status_code=500, detail="No final payload produced by the graph")
-    return QueryResponse(final=final)
-    """except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))"""
+    try:
+        return _format_required(final or {})
+    except Exception:
+        if isinstance(final, dict) and "manager_agent" in final and "agent_responses" in final:
+            return {"manager_agent": final["manager_agent"], "agent_responses": final["agent_responses"]}
+        return final or {}
+
+@app.post("/embeddings/upload")
+async def upload_and_build_embeddings(files: List[UploadFile] = File(...)):
+    
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded.")
+
+    os.makedirs(U.DATA_DIR, exist_ok=True)
+
+    saved: List[str] = []
+    skipped: List[str] = []
+
+    for f in files:
+        name = os.path.basename(f.filename or "").strip()
+        if not name:
+            skipped.append("(unnamed)")
+            continue
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in U.SUPPORTED_EXTS:
+            skipped.append(name)
+            continue
+
+        dest = os.path.join(U.DATA_DIR, name)
+        content = await f.read()
+        with open(dest, "wb") as out:
+            out.write(content)
+        saved.append(dest)
+
+    if not saved:
+        raise HTTPException(status_code=400, detail="No supported files were uploaded.")
+
+    per_file_docs = {}
+    for p in saved:
+        try:
+            per_file_docs[os.path.basename(p)] = len(load_path_as_documents(p))
+        except Exception:
+            per_file_docs[os.path.basename(p)] = 0
+
+    current_files = [os.path.basename(p) for p in list_file_paths(U.DATA_DIR)]
+
+    docs_count = U.rebuild_faiss_from_all_documents()
+
+    return {
+        "status": "ok",
+        "saved_files": [os.path.basename(p) for p in saved],
+        "skipped_files": skipped,
+        "per_file_loaded_docs": per_file_docs,
+        "total_supported_files_in_data": len(current_files),
+        "documents_indexed": docs_count,
+        "faiss_index_path": U.FAISS_DIR,
+    }
+
+@app.delete("/embeddings/reset")
+def delete_files_and_index():
+    """Delete all supported files in ./data and the entire FAISS index folder."""
+    result = U.delete_data_and_index()
+    return {"status": "ok", **result}
 
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")

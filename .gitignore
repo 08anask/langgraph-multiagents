@@ -2,10 +2,11 @@
 *.ipynb
 
 # Ignore environment variable files
-.env
 
 # Ignore Python cache files
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.1/
+.venv/

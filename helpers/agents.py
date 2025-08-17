@@ -1,48 +1,68 @@
 from typing import Dict, Any, List, Optional
-
+import os
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Literal
-
 from . import utils as U
 from .utils import (
     llm,
-    extract_json, looks_uncertain, professional_clarification,
+    looks_uncertain, professional_clarification,
     rewrite_query_for_web, ddg_search,
-    list_pdf_paths, load_pdf_as_documents, load_all_pdfs_as_documents, combine_documents_text
+    list_file_paths, load_path_as_documents, load_all_documents, combine_documents_text
 )
+class Agent1Summary(BaseModel):
+    summary: str = Field(..., description="3–4 sentence summary")
+    keywords: List[str] = Field(..., description="Top 5 keywords")
 
-# ---------- Agent 1: Summarize single PDF ----------
+class Agent2Answer(BaseModel):
+    response: str = Field(..., description="Final answer or clarification")
+    is_answered: bool = Field(..., description="Whether the question is answered from snippets")
+
+class Agent3Internet(BaseModel):
+    response: str = Field(..., description="Concise answer based on web snippets")
+    source: List[str] = Field(..., description="List of URLs used")
+
+_llm_agent1 = llm.with_structured_output(Agent1Summary)
+_llm_agent2 = llm.with_structured_output(Agent2Answer)
+_llm_agent3 = llm.with_structured_output(Agent3Internet)
+
+# ---------- Agent 1: Summarize PDF ----------
 def run_agent1_summarize(query_text: Optional[str]) -> Dict[str, Any]:
-    pdfs = list_pdf_paths()
+    pdfs = list_file_paths()
     if len(pdfs) != 1:
         return {"status": "400", "data": {"user_query": query_text or "", "error": f"Agent1 expects exactly one PDF in ./data, found {len(pdfs)}."}}
 
-    docs = load_pdf_as_documents(pdfs[0])
+    docs = load_path_as_documents(pdfs[0])
     doc_text = combine_documents_text(docs)
     prompt = (
         "Summarize in 3–4 sentences and extract the top 5 keywords.\n\n"
         f"{doc_text}\n\n"
-        "Respond strictly in JSON with keys: summary, keywords."
+        "Return fields: summary, keywords."
     )
-    resp = llm.invoke([HumanMessage(content=prompt)])
-    parsed = extract_json(resp.content if isinstance(resp.content, str) else "")
-    return {"status": "200", "data": {"user_query": query_text or "", **parsed}}
+    out: Agent1Summary = _llm_agent1.invoke([HumanMessage(content=prompt)])
+    return {"status": "200", "data": {"user_query": query_text or "", "summary": out.summary, "keywords": out.keywords}}
 
 # ---------- Agent 2: RAG over PDFs ----------
 def run_agent2_query(query_text: Optional[str]) -> Dict[str, Any]:
     q = (query_text or "").strip()
-    docs = load_all_pdfs_as_documents()
-    if not docs:
-        return {"status": "400", "data": {"user_query": q, "error": "Agent2 expected PDFs in ./data but found none."}}
 
-    # Build/load index; this will set U.faiss_store
-    U.init_faiss(docs)
+    try:
+        U.load_faiss_only()
+    except FileNotFoundError:
+        return {
+            "status": "400",
+            "data": {
+                "user_query": q,
+                "error": "Embeddings index not found. Upload files to /embeddings/upload to build embeddings first."
+            },
+        }
+    except Exception as e:
+        return {"status": "500", "data": {"user_query": q, "error": f"Failed to load FAISS index: {e}"}}
 
     if U.faiss_store is None:
         return {"status": "500", "data": {"user_query": q, "error": "FAISS store not initialized."}}
 
-    # Prefer scored retrieval where available
+    # Retrieval
     retrieved, scores = [], []
     try:
         results = U.faiss_store.similarity_search_with_score(q, k=4)
@@ -64,23 +84,18 @@ def run_agent2_query(query_text: Optional[str]) -> Dict[str, Any]:
         "Provide a brief, professional clarification asking the user to refine the question.\n\n"
         f"QUERY:\n{q}\n\n"
         f"RETRIEVED_SNIPPETS:\n{retrieved}\n\n"
-        'Respond STRICTLY in JSON with keys: "response": string, "is_answered": boolean.'
+        'Return fields: response (string), is_answered (boolean).'
     )
-    resp = llm.invoke([HumanMessage(content=prompt)])
-    parsed = extract_json(resp.content if isinstance(resp.content, str) else "")
-    resp_text = (parsed.get("response") or "").strip()
-    is_answered = bool(parsed.get("is_answered") is True)
+    out: Agent2Answer = _llm_agent2.invoke([HumanMessage(content=prompt)])
+    resp_text = (out.response or "").strip()
+    is_answered = bool(out.is_answered)
 
     if looks_uncertain(resp_text) or not resp_text:
         resp_text = professional_clarification(q)
         is_answered = False
 
     answerable = bool(is_answered and strong_evidence)
-    parsed["response"] = resp_text
-    parsed["is_answered"] = is_answered
-    parsed["answerable"] = answerable
-
-    return {"status": "200", "data": {"user_query": q, **parsed}}
+    return {"status": "200", "data": {"user_query": q, "response": resp_text, "is_answered": is_answered, "answerable": answerable}}
 
 # ---------- Agent 3: Internet (DDG) ----------
 def run_agent3_internet(query_text: Optional[str]) -> Dict[str, Any]:
@@ -88,11 +103,9 @@ def run_agent3_internet(query_text: Optional[str]) -> Dict[str, Any]:
     if not q_raw:
         return {"status": "400", "data": {"user_query": "", "response": "Please provide a query to search.", "source": []}}
 
-    # LLM rewrite (web-friendly)
     rewrite = rewrite_query_for_web(q_raw)
     q_rewritten = (rewrite.search_query or q_raw).strip()
 
-    # Search rewritten first, fall back to raw
     results = ddg_search(q_rewritten)
     if not results:
         results = ddg_search(q_raw)
@@ -114,7 +127,6 @@ def run_agent3_internet(query_text: Optional[str]) -> Dict[str, Any]:
                 "user_query": q_raw,
                 "response": professional_clarification(q_raw),
                 "source": urls,
-                # "rewrite": {"search_query": q_rewritten, "rationale": rewrite.rationale},
             },
         }
 
@@ -125,15 +137,13 @@ def run_agent3_internet(query_text: Optional[str]) -> Dict[str, Any]:
         f"USER QUERY (original):\n{q_raw}\n\n"
         f"REWRITTEN SEARCH QUERY:\n{q_rewritten}\n\n"
         f"DDG SNIPPETS:\n{evidence}\n\n"
-        "Respond strictly in JSON with keys: response, source (source is a list of URLs). "
-        "Keep the response concise and professional."
+        "Return fields: response (string), source (list of URLs)."
     )
-    resp = llm.invoke([HumanMessage(content=prompt)])
-    parsed = extract_json(resp.content if isinstance(resp.content, str) else "")
-    response_text = parsed.get("response") or (resp.content if isinstance(resp.content, str) else "")
+    out: Agent3Internet = _llm_agent3.invoke([HumanMessage(content=prompt)])
+    response_text = out.response or ""
     if looks_uncertain(response_text):
         response_text = professional_clarification(q_raw)
-    sources = parsed.get("source") or urls
+    sources = out.source or urls
 
     return {
         "status": "200",

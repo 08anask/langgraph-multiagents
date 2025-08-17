@@ -16,3 +16,11 @@ pypdf
 huggingface-hub
 transformers
 torch
+sentence-transformers
+duckduckgo-search
+doc2txt
+unstructured[all-docs]
+python-magic-bin
+pandas
+openpyxl
+xlrd
