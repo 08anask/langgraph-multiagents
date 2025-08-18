@@ -1,0 +1,13 @@
+.git
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.faiss*/ 
+faiss_bge_index/
+data/         # mount data at runtime instead
+streamlit_app.py
+node_modules/
+.dist/
+.1/
+.venv/

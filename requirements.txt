@@ -1,7 +1,5 @@
-flask
 streamlit
 requests
-beautifulsoup4
 fastapi
 uvicorn
 python-dotenv
@@ -20,7 +18,7 @@ sentence-transformers
 duckduckgo-search
 doc2txt
 unstructured[all-docs]
-python-magic-bin
+python-magic
 pandas
 openpyxl
 xlrd

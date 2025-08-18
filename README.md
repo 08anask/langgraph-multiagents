@@ -2,6 +2,8 @@
 
 This project exposes a simple multi-agent Retrieval-Augmented Generation (RAG) service with optional web search. It’s built as a FastAPI app that orchestrates three task-focused agents via a lightweight LangGraph state machine, and it manages local document embeddings with FAISS. Below is a high-level explanation of how it all works so you can understand the approach and the request/response flow.
 
+Also, the execution commands can be found at the end of this documentation. **Please add the GEMINI API KEY in the .env file.**
+
 ---
 
 ## 1 What this service does
@@ -123,13 +125,69 @@ This project exposes a simple multi-agent Retrieval-Augmented Generation (RAG) s
 
 ## 9 Minimal run instructions (local)
 
-1. Put supported files in `./data` (or use `POST /embeddings/upload`).
-2. Start the API (e.g., `uvicorn app:app --reload`).
-3. Call:
-
+### Option A: Run directly with uvicorn
+1. Put supported files in ./data (or use POST /embeddings/upload).
+2. Start the API:
+   ```bash
+   uvicorn app:app --reload
+   ```
+3. Call the endpoints:
    * `GET /health`
    * `POST /embeddings/upload`
    * `POST /query` with `{ "thread_id": "demo", "query": "your question" }`
    * `DELETE /embeddings/reset` to start over.
+
+### Option B: Run with Docker
+1. Build the image:
+   ```bash
+   docker build -t rag-manager-api:latest .
+   ```
+2. Run the container:
+#### For Windows Powershell
+   ```bash
+   docker run --rm -p 8000:8000 -v ${PWD}:/app --env-file .env rag-manager-api:latest
+   ```
+
+#### Linux / macOS (bash/zsh)
+   ```bash
+   docker run --rm -p 8000:8000 -v "${PWD}:/app" --env-file .env rag-manager-api:latest
+   ```
+
+#### Windows Command Prompt (cmd.exe)
+   ```bash
+   docker run --rm -p 8000:8000 -v "%cd%:/app" --env-file .env rag-manager-api:latest
+   ```
+---
+
+## 10 Example cURL calls
+
+### Health check
+```bash
+curl --location --request GET 'http://localhost:8000/health'
+```
+
+### Upload documents for embeddings
+```bash
+curl --location 'http://localhost:8000/embeddings/upload' \
+--header 'Accept: application/json' \
+--form 'files=@"./data/file1.pdf"' \
+--form 'files=@"./data/file2.pdf"' \
+--form 'files=@"./data/file3.pdf"'
+```
+
+### Query
+```bash
+curl --location 'http://localhost:8000/query' \
+--header 'Content-Type: application/json' \
+--data '{
+    "thread_id": "demo-thread",
+    "query": "What is Formula 1?"
+  }'
+```
+
+### Reset embeddings
+```bash
+curl --location --request DELETE 'http://localhost:8000/embeddings/reset'
+```
 
 ---
